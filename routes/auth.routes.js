@@ -7,6 +7,7 @@ router.post('/register', authController.register);
 router.post('/login', authController.login);
 router.post('/logout', auth, authController.logout);
 router.get('/me', auth, authController.me);
+router.put('/me/theme', auth, authController.updateTheme);
 router.post('/refresh', auth, authController.refresh);
 
 module.exports = router;

@@ -8,6 +8,7 @@ CREATE TABLE IF NOT EXISTS users (
   password_hash VARCHAR(255) NOT NULL,
   phone         VARCHAR(20) DEFAULT NULL,
   role          ENUM('user', 'admin') DEFAULT 'user',
+  theme_preference VARCHAR(10) DEFAULT 'dark',
   is_active     BOOLEAN DEFAULT TRUE,
   created_at    TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
   updated_at    TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP

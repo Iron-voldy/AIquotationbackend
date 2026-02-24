@@ -49,7 +49,7 @@ exports.register = async (req, res, next) => {
         );
 
         const userId = result.insertId;
-        const user = { id: userId, name: name.trim(), email: email.toLowerCase().trim(), role: 'user' };
+        const user = { id: userId, name: name.trim(), email: email.toLowerCase().trim(), role: 'user', theme_preference: 'dark' };
 
         const token = generateToken(user);
 
@@ -75,7 +75,7 @@ exports.login = async (req, res, next) => {
 
         // Find user
         const [rows] = await pool.query(
-            'SELECT id, name, email, password_hash, role, is_active FROM users WHERE email = ?',
+            'SELECT id, name, email, password_hash, role, is_active, theme_preference FROM users WHERE email = ?',
             [email.toLowerCase().trim()]
         );
 
@@ -94,7 +94,7 @@ exports.login = async (req, res, next) => {
             return res.status(401).json({ error: 'Invalid email or password.' });
         }
 
-        const userData = { id: user.id, name: user.name, email: user.email, role: user.role };
+        const userData = { id: user.id, name: user.name, email: user.email, role: user.role, theme_preference: user.theme_preference || 'dark' };
         const token = generateToken(userData);
 
         res.json({
@@ -112,7 +112,7 @@ exports.login = async (req, res, next) => {
 exports.me = async (req, res, next) => {
     try {
         const [rows] = await pool.query(
-            'SELECT id, name, email, role, phone, is_active, created_at FROM users WHERE id = ?',
+            'SELECT id, name, email, role, phone, is_active, theme_preference, created_at FROM users WHERE id = ?',
             [req.user.id]
         );
 
@@ -146,6 +146,20 @@ exports.refresh = async (req, res, next) => {
             token,
             expiresIn: process.env.JWT_EXPIRES_IN || '24h'
         });
+    } catch (error) {
+        next(error);
+    }
+};
+
+// PUT /api/auth/theme
+exports.updateTheme = async (req, res, next) => {
+    try {
+        const { themePreference } = req.body;
+        if (!themePreference || !['light', 'dark'].includes(themePreference)) {
+            return res.status(400).json({ error: 'themePreference must be "light" or "dark".' });
+        }
+        await pool.query('UPDATE users SET theme_preference = ? WHERE id = ?', [themePreference, req.user.id]);
+        res.json({ success: true, themePreference });
     } catch (error) {
         next(error);
     }

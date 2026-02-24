@@ -159,10 +159,26 @@ exports.saveFromChat = async (req, res, next) => {
         // Save to quotations table with status accepted
         const [result] = await pool.query(
             'INSERT INTO quotations (user_id, quotation_no, prompt_text, status, response_data) VALUES (?, ?, ?, ?, ?)',
-            [userId, msg.quotation_no, promptText, 'accepted', msg.response_data || null]
+            [userId, msg.quotation_no, promptText, 'accepted', msg.response_data ? JSON.stringify(msg.response_data) : null]
         );
 
         const [saved] = await pool.query('SELECT * FROM quotations WHERE id = ?', [result.insertId]);
+
+        // Send quotation email via n8n webhook (fire-and-forget)
+        try {
+            await fetch('https://aahaas-ai.app.n8n.cloud/webhook/send-quotation-email', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    quotationID: `${msg.quotation_no}/R1`,
+                    email: req.user.email
+                })
+            });
+            console.log(`Webhook sent for quotation: ${msg.quotation_no}/R1`);
+        } catch (webhookError) {
+            console.error('Failed to send quotation email webhook:', webhookError.message);
+        }
+
         res.status(201).json({ success: true, quotation: saved[0] });
     } catch (error) {
         next(error);
