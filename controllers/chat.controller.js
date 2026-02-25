@@ -1,4 +1,5 @@
 const pool = require('../config/database');
+const fetch = require('node-fetch');
 const appleTokenService = require('../services/appleToken.service');
 const webhookService = require('../services/webhook.service');
 
@@ -155,6 +156,22 @@ exports.sendMessage = async (req, res, next) => {
                 'UPDATE chat_sessions SET title = ?, updated_at = NOW() WHERE id = ? AND title = ?',
                 [`Quotation #${savedQuotationNo}`, sessionId, 'New Chat']
             );
+
+            // Fire quotation email webhook (fire-and-forget)
+            try {
+                const userEmail = req.user.email;
+                fetch('https://aahaas-ai.app.n8n.cloud/webhook/send-quotation-email', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        quotationID: `${savedQuotationNo}/R1`,
+                        email: userEmail
+                    })
+                }).then(r => console.log(`[CHAT] Quotation email webhook sent for ${savedQuotationNo}, status: ${r.status}`))
+                  .catch(err => console.error('[CHAT] Quotation email webhook failed:', err.message));
+            } catch (emailErr) {
+                console.error('[CHAT] Failed to trigger quotation email:', emailErr.message);
+            }
         } else {
             assistantContent = webhookResponse?.error ||
                 'Sorry, I could not create a quotation at this time. Please try rephrasing your request with destination, dates, and number of travelers.';

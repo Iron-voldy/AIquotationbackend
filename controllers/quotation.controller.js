@@ -1,4 +1,5 @@
 const pool = require('../config/database');
+const fetch = require('node-fetch');
 
 // GET /api/quotations
 exports.list = async (req, res, next) => {
