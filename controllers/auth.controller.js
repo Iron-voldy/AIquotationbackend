@@ -169,3 +169,87 @@ exports.updateTheme = async (req, res, next) => {
 exports.logout = async (req, res) => {
     res.json({ success: true, message: 'Logged out successfully.' });
 };
+
+// POST /api/auth/agent-login  — authenticate against external Apple API
+exports.agentLogin = async (req, res, next) => {
+    try {
+        const { email, password } = req.body;
+
+        if (!email || !password) {
+            return res.status(400).json({ error: 'Email and password are required.' });
+        }
+
+        const APPLE_API_URL = process.env.APPLE_API_URL || 'https://stagev2.appletechlabs.com/api';
+
+        // Authenticate against external Apple API
+        const fetch = require('node-fetch');
+        const formData = new URLSearchParams();
+        formData.append('email', email.toLowerCase().trim());
+        formData.append('password', password);
+
+        const appleRes = await fetch(`${APPLE_API_URL}/auth/login`, {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/x-www-form-urlencoded',
+                'Accept': 'application/json'
+            },
+            body: formData.toString()
+        });
+
+        if (!appleRes.ok) {
+            const text = await appleRes.text();
+            console.error('[AGENT LOGIN] Apple API login failed:', appleRes.status, text);
+            return res.status(401).json({ error: 'Invalid agent credentials. Please check your email and password.' });
+        }
+
+        const appleData = await appleRes.json();
+        console.log('[AGENT LOGIN] Apple API login successful for:', email);
+
+        // Extract agent info from Apple API response
+        const agentEmail = email.toLowerCase().trim();
+        const agentName = appleData.user?.name || appleData.name || agentEmail.split('@')[0];
+        const appleAccessToken = appleData.access_token || appleData.token;
+
+        // Create or find agent user in local DB so they can use the system
+        let [existing] = await pool.query('SELECT id, name, email, role, is_active, theme_preference FROM users WHERE email = ?', [agentEmail]);
+
+        let localUser;
+        if (existing.length > 0) {
+            localUser = existing[0];
+            if (!localUser.is_active) {
+                return res.status(403).json({ error: 'Your agent account has been deactivated. Please contact admin.' });
+            }
+        } else {
+            // Auto-create a local agent user (no local password needed — they auth via Apple API)
+            const placeholderHash = await bcrypt.hash(`__agent__${Date.now()}__`, 10);
+            const [result] = await pool.query(
+                'INSERT INTO users (name, email, password_hash, role) VALUES (?, ?, ?, ?)',
+                [agentName, agentEmail, placeholderHash, 'user']
+            );
+            localUser = { id: result.insertId, name: agentName, email: agentEmail, role: 'user', theme_preference: 'dark' };
+            console.log('[AGENT LOGIN] Created local agent user:', agentEmail, 'id:', localUser.id);
+        }
+
+        // Issue a local JWT so the agent can use dashboard, chat, quotations
+        const userData = {
+            id: localUser.id,
+            name: localUser.name || agentName,
+            email: localUser.email,
+            role: localUser.role || 'user',
+            theme_preference: localUser.theme_preference || 'dark',
+            isAgent: true
+        };
+        const token = generateToken(userData);
+
+        res.json({
+            success: true,
+            user: userData,
+            token,
+            appleAccessToken: appleAccessToken || null,
+            expiresIn: process.env.JWT_EXPIRES_IN || '24h'
+        });
+    } catch (error) {
+        console.error('[AGENT LOGIN] Error:', error.message);
+        next(error);
+    }
+};
