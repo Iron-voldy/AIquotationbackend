@@ -80,6 +80,14 @@ exports.sendMessage = async (req, res, next) => {
     try {
         const { chatSessionId, message } = req.body;
 
+        console.log('='.repeat(60));
+        console.log('[CHAT SEND] === NEW MESSAGE REQUEST ===');
+        console.log('[CHAT SEND] User ID:', req.user.id);
+        console.log('[CHAT SEND] User Email:', req.user.email);
+        console.log('[CHAT SEND] JWT isAgent flag:', req.user.isAgent);
+        console.log('[CHAT SEND] JWT full payload:', JSON.stringify(req.user));
+        console.log('='.repeat(60));
+
         if (!message || !message.trim()) {
             return res.status(400).json({ error: 'Message is required.' });
         }
@@ -95,6 +103,7 @@ exports.sendMessage = async (req, res, next) => {
                 [userId, title]
             );
             sessionId = result.insertId;
+            console.log('[CHAT SEND] Created new session:', sessionId);
         } else {
             // Verify session belongs to user
             const [session] = await pool.query(
@@ -114,13 +123,55 @@ exports.sendMessage = async (req, res, next) => {
             [sessionId, userId, 'user', message.trim()]
         );
 
-        // Get shared Apple token
+        // ═══════════════════════════════════════════════════════
+        // AGENT CHECK — determine if this user is an agent
+        // Check BOTH the JWT isAgent flag AND the agent_tokens table
+        // ═══════════════════════════════════════════════════════
+        let isAgent = !!req.user.isAgent;
+        console.log('[AGENT CHECK] Step 1 — JWT isAgent:', isAgent);
+        
+        // Double-check: if user has an agent token in DB, they are an agent
+        let agentCheck = [];
+        try {
+            const [rows] = await pool.query(
+                'SELECT apple_access_token, expires_at FROM agent_tokens WHERE user_id = ? LIMIT 1',
+                [userId]
+            );
+            agentCheck = rows;
+            console.log('[AGENT CHECK] Step 2 — agent_tokens table rows:', agentCheck.length);
+            if (agentCheck.length > 0) {
+                console.log('[AGENT CHECK] Step 2 — Token expires at:', agentCheck[0].expires_at);
+                isAgent = true;
+            }
+        } catch (dbErr) {
+            console.error('[AGENT CHECK] Step 2 — DB query failed (table may not exist):', dbErr.message);
+            // Table might not exist yet — that's OK, means no agents
+        }
+        
+        console.log('[AGENT CHECK] *** FINAL isAgent:', isAgent, '***');
+        
         let appleToken;
         try {
-            appleToken = await appleTokenService.getValidToken();
+            if (isAgent && agentCheck.length > 0) {
+                // Agent: use their own Apple token
+                if (new Date(agentCheck[0].expires_at) > new Date()) {
+                    appleToken = agentCheck[0].apple_access_token;
+                    console.log('[CHAT SEND] Using AGENT\'s own Apple token for user:', userId);
+                } else {
+                    console.error('[CHAT SEND] Agent token EXPIRED for user:', userId);
+                    throw new Error('Agent token expired. Please log in again.');
+                }
+            } else {
+                // Regular user: use shared Apple token
+                isAgent = false; // ensure this is false for the email webhook check below
+                appleToken = await appleTokenService.getValidToken();
+                console.log('[CHAT SEND] Using SHARED Apple token for regular user:', userId);
+            }
         } catch (tokenErr) {
             console.error('[CHAT SEND] Failed to get Apple token:', tokenErr.message);
-            const errMsg = 'AI service is temporarily unavailable. Please try again later.';
+            const errMsg = isAgent
+                ? 'Your agent session has expired. Please log out and log in again.'
+                : 'AI service is temporarily unavailable. Please try again later.';
             await pool.query(
                 'INSERT INTO chat_messages (chat_session_id, user_id, role, content, is_success) VALUES (?, ?, ?, ?, ?)',
                 [sessionId, userId, 'assistant', errMsg, false]
@@ -133,9 +184,9 @@ exports.sendMessage = async (req, res, next) => {
         }
 
         // Call n8n webhook
+        console.log('[CHAT SEND] Calling n8n webhook...');
         const webhookResponse = await webhookService.sendToN8N(message.trim(), appleToken);
-
-        console.log('[CHAT SEND] Webhook response:', webhookResponse);
+        console.log('[CHAT SEND] Webhook response received:', JSON.stringify(webhookResponse).substring(0, 200));
 
         // Parse response: check for quotation_no
         const quotationNo = webhookResponse?.quotation_no;
@@ -148,29 +199,39 @@ exports.sendMessage = async (req, res, next) => {
             savedQuotationNo = String(quotationNo);
             assistantContent = webhookResponse.message || `Your travel quotation has been created successfully! Quotation number: ${savedQuotationNo}`;
 
-            // Do NOT save to quotations table yet — only save when user accepts
-            // Store the response_data in the chat message for later retrieval
-
             // Update session title with quotation number if it's still default
             await pool.query(
                 'UPDATE chat_sessions SET title = ?, updated_at = NOW() WHERE id = ? AND title = ?',
                 [`Quotation #${savedQuotationNo}`, sessionId, 'New Chat']
             );
 
-            // Fire quotation email webhook (fire-and-forget)
-            try {
-                const userEmail = req.user.email;
-                fetch('https://aahaas-ai.app.n8n.cloud/webhook/send-quotation-email', {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({
-                        quotationID: `${savedQuotationNo}/R1`,
-                        email: userEmail
-                    })
-                }).then(r => console.log(`[CHAT] Quotation email webhook sent for ${savedQuotationNo}, status: ${r.status}`))
-                  .catch(err => console.error('[CHAT] Quotation email webhook failed:', err.message));
-            } catch (emailErr) {
-                console.error('[CHAT] Failed to trigger quotation email:', emailErr.message);
+            // ═══════════════════════════════════════════════════════
+            // EMAIL WEBHOOK DECISION — ONLY for regular users
+            // ═══════════════════════════════════════════════════════
+            console.log('='.repeat(60));
+            console.log(`[EMAIL DECISION] Quotation ${savedQuotationNo} created`);
+            console.log(`[EMAIL DECISION] isAgent = ${isAgent}`);
+            console.log(`[EMAIL DECISION] Action: ${isAgent ? '*** SKIPPING EMAIL (agent) ***' : 'SENDING EMAIL (regular user)'}`);
+            console.log('='.repeat(60));
+            
+            if (!isAgent) {
+                try {
+                    const userEmail = req.user.email;
+                    console.log(`[EMAIL WEBHOOK] Sending email for quotation ${savedQuotationNo} to ${userEmail}`);
+                    fetch('https://aahaas-ai.app.n8n.cloud/webhook/send-quotation-email', {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({
+                            quotationID: `${savedQuotationNo}/R1`,
+                            email: userEmail
+                        })
+                    }).then(r => console.log(`[EMAIL WEBHOOK] Status: ${r.status}`))
+                      .catch(err => console.error('[EMAIL WEBHOOK] Failed:', err.message));
+                } catch (emailErr) {
+                    console.error('[EMAIL WEBHOOK] Error:', emailErr.message);
+                }
+            } else {
+                console.log(`[EMAIL WEBHOOK] *** NOT SENDING — user ${userId} is an AGENT ***`);
             }
         } else {
             assistantContent = webhookResponse?.error ||
@@ -185,6 +246,8 @@ exports.sendMessage = async (req, res, next) => {
 
         const [savedMsg] = await pool.query('SELECT * FROM chat_messages WHERE id = ?', [msgResult.insertId]);
 
+        console.log('[CHAT SEND] Message saved. ID:', msgResult.insertId, '| Quotation:', savedQuotationNo || 'none');
+
         res.json({
             success: true,
             message: savedMsg[0],
@@ -193,6 +256,7 @@ exports.sendMessage = async (req, res, next) => {
             chatSessionId: sessionId
         });
     } catch (error) {
+        console.error('[CHAT SEND] FATAL ERROR:', error.message);
         next(error);
     }
 };

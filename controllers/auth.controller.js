@@ -4,7 +4,7 @@ const pool = require('../config/database');
 
 const generateToken = (user) => {
     return jwt.sign(
-        { id: user.id, email: user.email, role: user.role },
+        { id: user.id, email: user.email, role: user.role, isAgent: !!user.isAgent },
         process.env.JWT_SECRET,
         { expiresIn: process.env.JWT_EXPIRES_IN || '24h' }
     );
@@ -228,6 +228,31 @@ exports.agentLogin = async (req, res, next) => {
             );
             localUser = { id: result.insertId, name: agentName, email: agentEmail, role: 'user', theme_preference: 'dark' };
             console.log('[AGENT LOGIN] Created local agent user:', agentEmail, 'id:', localUser.id);
+        }
+
+        // Store the agent's Apple access token in DB for use in chat
+        if (appleAccessToken) {
+            const expiresIn = appleData.expires_in || 3600;
+            const expiresAt = new Date(Date.now() + expiresIn * 1000);
+            // Create agent_tokens table if it doesn't exist
+            await pool.query(`
+                CREATE TABLE IF NOT EXISTS agent_tokens (
+                    id INT AUTO_INCREMENT PRIMARY KEY,
+                    user_id INT NOT NULL,
+                    apple_access_token TEXT NOT NULL,
+                    expires_at TIMESTAMP NOT NULL,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    UNIQUE KEY idx_user_id (user_id)
+                )
+            `);
+            // Upsert the agent's token
+            await pool.query(
+                `INSERT INTO agent_tokens (user_id, apple_access_token, expires_at)
+                 VALUES (?, ?, ?)
+                 ON DUPLICATE KEY UPDATE apple_access_token = VALUES(apple_access_token), expires_at = VALUES(expires_at)`,
+                [localUser.id, appleAccessToken, expiresAt]
+            );
+            console.log('[AGENT LOGIN] Stored Apple token for user:', localUser.id);
         }
 
         // Issue a local JWT so the agent can use dashboard, chat, quotations

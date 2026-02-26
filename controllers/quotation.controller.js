@@ -113,6 +113,14 @@ exports.saveFromChat = async (req, res, next) => {
         const { chatMessageId } = req.body;
         const userId = req.user.id;
 
+        console.log('='.repeat(60));
+        console.log('[QUOTATION SAVE] === SAVE FROM CHAT REQUEST ===');
+        console.log('[QUOTATION SAVE] User ID:', userId);
+        console.log('[QUOTATION SAVE] User Email:', req.user.email);
+        console.log('[QUOTATION SAVE] JWT isAgent:', req.user.isAgent);
+        console.log('[QUOTATION SAVE] chatMessageId:', chatMessageId);
+        console.log('='.repeat(60));
+
         if (!chatMessageId) {
             return res.status(400).json({ error: 'chatMessageId is required.' });
         }
@@ -164,24 +172,54 @@ exports.saveFromChat = async (req, res, next) => {
         );
 
         const [saved] = await pool.query('SELECT * FROM quotations WHERE id = ?', [result.insertId]);
+        console.log('[QUOTATION SAVE] Quotation saved to DB. ID:', result.insertId, '| No:', msg.quotation_no);
 
-        // Send quotation email via n8n webhook (fire-and-forget)
+        // ═══════════════════════════════════════════════════════
+        // EMAIL WEBHOOK DECISION — ONLY for regular users
+        // ═══════════════════════════════════════════════════════
+        let isAgent = !!req.user.isAgent;
+        console.log('[QUOTATION SAVE] Agent check Step 1 — JWT isAgent:', isAgent);
+        
         try {
-            await fetch('https://aahaas-ai.app.n8n.cloud/webhook/send-quotation-email', {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({
-                    quotationID: `${msg.quotation_no}/R1`,
-                    email: req.user.email
-                })
-            });
-            console.log(`Webhook sent for quotation: ${msg.quotation_no}/R1`);
-        } catch (webhookError) {
-            console.error('Failed to send quotation email webhook:', webhookError.message);
+            const [agentCheck] = await pool.query(
+                'SELECT id FROM agent_tokens WHERE user_id = ? LIMIT 1',
+                [userId]
+            );
+            console.log('[QUOTATION SAVE] Agent check Step 2 — agent_tokens rows:', agentCheck.length);
+            if (agentCheck.length > 0) {
+                isAgent = true;
+            }
+        } catch (dbErr) {
+            console.error('[QUOTATION SAVE] Agent check DB error:', dbErr.message);
+        }
+
+        console.log('='.repeat(60));
+        console.log(`[QUOTATION SAVE] *** FINAL isAgent: ${isAgent} ***`);
+        console.log(`[QUOTATION SAVE] Action: ${isAgent ? '*** SKIPPING EMAIL (agent) ***' : 'SENDING EMAIL (regular user)'}`);
+        console.log('='.repeat(60));
+
+        if (!isAgent) {
+            try {
+                console.log(`[QUOTATION EMAIL] Sending email webhook for ${msg.quotation_no}/R1 to ${req.user.email}`);
+                await fetch('https://aahaas-ai.app.n8n.cloud/webhook/send-quotation-email', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        quotationID: `${msg.quotation_no}/R1`,
+                        email: req.user.email
+                    })
+                });
+                console.log(`[QUOTATION EMAIL] Email webhook sent successfully`);
+            } catch (webhookError) {
+                console.error('[QUOTATION EMAIL] Failed:', webhookError.message);
+            }
+        } else {
+            console.log(`[QUOTATION EMAIL] *** NOT SENDING — user ${userId} is an AGENT ***`);
         }
 
         res.status(201).json({ success: true, quotation: saved[0] });
     } catch (error) {
+        console.error('[QUOTATION SAVE] FATAL ERROR:', error.message);
         next(error);
     }
 };

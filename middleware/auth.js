@@ -5,6 +5,7 @@ const auth = async (req, res, next) => {
         const authHeader = req.headers.authorization;
 
         if (!authHeader || !authHeader.startsWith('Bearer ')) {
+            console.log('[AUTH MIDDLEWARE] No token provided for:', req.method, req.path);
             return res.status(401).json({ error: 'Access denied. No token provided.' });
         }
 
@@ -16,6 +17,7 @@ const auth = async (req, res, next) => {
 
         const decoded = jwt.verify(token, process.env.JWT_SECRET);
         req.user = decoded;
+        console.log(`[AUTH MIDDLEWARE] User: ${decoded.id} | Email: ${decoded.email} | isAgent: ${decoded.isAgent} | Path: ${req.method} ${req.path}`);
         next();
     } catch (error) {
         if (error.name === 'TokenExpiredError') {
