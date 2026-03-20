@@ -184,8 +184,12 @@ exports.sendMessage = async (req, res, next) => {
         }
 
         // Call n8n webhook
-        console.log('[CHAT SEND] Calling n8n webhook...');
-        const webhookResponse = await webhookService.sendToN8N(message.trim(), appleToken);
+        // Build a unique session ID that scopes n8n's AI memory to this user + this chat
+        // session only.  Without this every regular user shares the same Apple token as the
+        // sessionId, so n8n conflates ALL users' conversations into a single memory thread.
+        const n8nSessionId = `u${userId}_s${sessionId}`;
+        console.log('[CHAT SEND] Calling n8n webhook with n8nSessionId:', n8nSessionId);
+        const webhookResponse = await webhookService.sendToN8N(message.trim(), appleToken, n8nSessionId);
         console.log('[CHAT SEND] Webhook response received:', JSON.stringify(webhookResponse).substring(0, 200));
 
         // Parse response: check for quotation_no

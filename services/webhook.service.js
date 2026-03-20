@@ -5,16 +5,25 @@ const N8N_WEBHOOK_URL = process.env.N8N_WEBHOOK_URL;
 const TIMEOUT_MS = 180000; // 3 minutes
 
 /**
- * Send a message to the n8n webhook using the shared Apple token
+ * Send a message to the n8n webhook.
+ *
+ * @param {string} chatInput    - The user's message text
+ * @param {string} appleToken   - Apple API bearer token (auth only)
+ * @param {string} n8nSessionId - Unique ID for this user+chat session so n8n keeps
+ *                                each conversation's memory isolated (e.g. "u5_s42").
+ *                                Falls back to appleToken if not supplied (legacy behaviour).
  */
-const sendToN8N = async (chatInput, appleToken) => {
+const sendToN8N = async (chatInput, appleToken, n8nSessionId) => {
     console.log('[WEBHOOK] Sending to n8n...');
     console.log('[WEBHOOK] chatInput:', chatInput.substring(0, 100) + (chatInput.length > 100 ? '...' : ''));
     console.log('[WEBHOOK] Token present:', !!appleToken);
+    console.log('[WEBHOOK] n8nSessionId:', n8nSessionId || '(using appleToken fallback)');
 
     const payload = {
         chatInput: chatInput,
-        sessionId: appleToken,
+        // sessionId drives n8n's conversation memory — must be unique per user per chat
+        // so that different users/sessions never share AI context.
+        sessionId: n8nSessionId || appleToken,
         bearerToken: appleToken
     };
 
