@@ -1,5 +1,5 @@
 const fetch = require('node-fetch');
-require('dotenv').config();
+require('dotenv').config({ path: require('path').join(__dirname, '..', '.env') });
 
 const N8N_WEBHOOK_URL = process.env.N8N_WEBHOOK_URL;
 const TIMEOUT_MS = 180000; // 3 minutes
@@ -17,13 +17,22 @@ const sendToN8N = async (chatInput, appleToken, n8nSessionId) => {
     console.log('[WEBHOOK] Sending to n8n...');
     console.log('[WEBHOOK] chatInput:', chatInput.substring(0, 100) + (chatInput.length > 100 ? '...' : ''));
     console.log('[WEBHOOK] Token present:', !!appleToken);
-    console.log('[WEBHOOK] n8nSessionId:', n8nSessionId || '(using appleToken fallback)');
+    console.log('[WEBHOOK] n8nSessionId:', n8nSessionId);
+
+    // Hard guard: n8nSessionId must always be a non-empty string unique to this
+    // user+session. If it is missing we would fall back to the shared Apple token,
+    // making ALL regular-user requests share the same n8n memory thread and
+    // delivering each other's quotation responses — the cross-user contamination bug.
+    if (!n8nSessionId || typeof n8nSessionId !== 'string' || !n8nSessionId.trim()) {
+        console.error('[WEBHOOK] BLOCKED — n8nSessionId is missing. This would contaminate sessions across users.');
+        return { success: false, error: 'Internal error: session ID not set. Please start a new chat.' };
+    }
 
     const payload = {
         chatInput: chatInput,
-        // sessionId drives n8n's conversation memory — must be unique per user per chat
-        // so that different users/sessions never share AI context.
-        sessionId: n8nSessionId || appleToken,
+        // sessionId scopes n8n conversation memory to this exact user+chat session.
+        // It must NEVER be the shared Apple token — that would merge all users into one thread.
+        sessionId: n8nSessionId,
         bearerToken: appleToken
     };
 

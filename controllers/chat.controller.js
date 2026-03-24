@@ -153,13 +153,48 @@ exports.sendMessage = async (req, res, next) => {
         let appleToken;
         try {
             if (isAgent && agentCheck.length > 0) {
-                // Agent: use their own Apple token
-                if (new Date(agentCheck[0].expires_at) > new Date()) {
-                    appleToken = agentCheck[0].apple_access_token;
+                const agentRow = agentCheck[0];
+                const tokenExpired = new Date(agentRow.expires_at) <= new Date();
+
+                if (!tokenExpired) {
+                    // Token still valid — use it directly
+                    appleToken = agentRow.apple_access_token;
                     console.log('[CHAT SEND] Using AGENT\'s own Apple token for user:', userId);
                 } else {
-                    console.error('[CHAT SEND] Agent token EXPIRED for user:', userId);
-                    throw new Error('Agent token expired. Please log in again.');
+                    // Token expired — try to refresh via Apple API before giving up
+                    console.warn('[CHAT SEND] Agent token expired for user:', userId, '— attempting refresh...');
+                    const APPLE_API_URL = process.env.APPLE_API_URL || 'https://stagev2.appletechlabs.com/api';
+                    try {
+                        const refreshRes = await fetch(`${APPLE_API_URL}/auth/refresh`, {
+                            method: 'POST',
+                            headers: {
+                                'Authorization': `Bearer ${agentRow.apple_access_token}`,
+                                'Accept': 'application/json',
+                                'Content-Type': 'application/x-www-form-urlencoded'
+                            }
+                        });
+                        if (refreshRes.ok) {
+                            const refreshData = await refreshRes.json();
+                            const newAppleToken = refreshData.access_token || refreshData.token;
+                            if (newAppleToken) {
+                                const expiresIn = refreshData.expires_in || 3600;
+                                const expiresAt = new Date(Date.now() + expiresIn * 1000);
+                                await pool.query(
+                                    'UPDATE agent_tokens SET apple_access_token = ?, expires_at = ? WHERE user_id = ?',
+                                    [newAppleToken, expiresAt, userId]
+                                );
+                                appleToken = newAppleToken;
+                                console.log('[CHAT SEND] Agent token refreshed successfully for user:', userId);
+                            } else {
+                                throw new Error('Refresh response missing token');
+                            }
+                        } else {
+                            throw new Error(`Apple refresh returned ${refreshRes.status}`);
+                        }
+                    } catch (refreshErr) {
+                        console.error('[CHAT SEND] Agent token refresh failed:', refreshErr.message);
+                        throw new Error('Agent token expired. Please log out and log in again.');
+                    }
                 }
             } else {
                 // Regular user: use shared Apple token
@@ -261,6 +296,95 @@ exports.sendMessage = async (req, res, next) => {
         });
     } catch (error) {
         console.error('[CHAT SEND] FATAL ERROR:', error.message);
+        next(error);
+    }
+};
+
+// POST /api/chat/optimize-prompt
+// Proxies the user's failed prompt to OpenAI (server-side, avoiding browser CORS restrictions)
+// and returns 2-3 simplified booking prompt suggestions.
+const OPTIMIZE_SYSTEM_PROMPT = `You are a travel booking prompt optimizer for a Southeast/South Asian travel company.
+
+The user sent a complex or unclear travel request that the booking system could NOT process.
+Your job: extract the travel details and return 2–3 SIMPLIFIED prompts the system CAN handle.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+SUPPORTED DESTINATIONS ONLY
+(map any city, landmark, or attraction to these countries)
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+• Sri Lanka  → Colombo, Kandy, Galle, Nuwara Eliya, Ella, Bentota, Sigiriya,
+               Dambulla, Anuradhapura, Mirissa, Trincomalee, Yala
+• Malaysia   → Kuala Lumpur, Langkawi, Penang
+               Landmarks: Twin Towers, Petronas, KLCC, Genting, Putrajaya,
+               Batu Caves, KL Tower, Aquaria KLCC, Sunway Lagoon
+• Vietnam    → Hanoi, Da Nang, Ho Chi Minh City (Saigon), Phu Quoc, Sa Pa
+• Singapore  → Singapore City
+               Landmarks: Marina Bay Sands, Gardens by the Bay, Universal Studios,
+               Sentosa, Orchard Road, Clarke Quay
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+OUTPUT FORMAT — JSON array ONLY, no extra text
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+["prompt 1", "prompt 2", "prompt 3"]
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+PROMPT FORMAT RULES
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+Each prompt MUST follow this pattern:
+  "Create [Country] for [X] nights for [N] pax"
+  "Create [Country] for [X] nights for [N] adults and [Y] children traveling on [Date] with [star]-star hotel"
+
+Rules:
+1. Country is ALWAYS the country name (Sri Lanka / Malaysia / Vietnam / Singapore), NOT the city.
+2. Remove all activity/tour/landmark details — booking system does not support them.
+3. Simplify pax: ignore "no bed", "extra bed", bed type, child ages — just count adults and children.
+4. If multiple cities mentioned for the same country, use only the country name.
+5. If no duration found, generate variants: 3-night and 5-night options.
+6. If travel date found, include it as "Xth Month YYYY" (e.g., "5th April 2026").
+7. If hotel star rating found (e.g., 4 star, luxury), include "with X-star hotel".
+8. Generate exactly 2 prompts: one minimal, one with full details.
+9. If destination is NOT in the supported list, return: ["Sorry, we only support Sri Lanka, Malaysia, Vietnam, and Singapore at this time."]
+
+Example input: "create a quote for 2 adults + 1 child 8 yrs no bed for 5th April 2026 with 4 star hotel, city tour, twin tower, day trip of genting, out door theme park, putrajaya, on private transfer"
+Example output: ["Create Malaysia for 3 nights for 2 adults and 1 child", "Create Malaysia for 3 nights for 2 adults and 1 child traveling on 5th April 2026 with 4-star hotel"]`;
+
+exports.optimizePrompt = async (req, res, next) => {
+    try {
+        const { prompt } = req.body;
+        if (!prompt || !prompt.trim()) {
+            return res.status(400).json({ error: 'prompt is required.' });
+        }
+
+        if (!process.env.OPENAI_API_KEY) {
+            return res.status(503).json({ error: 'OpenAI is not configured on this server.' });
+        }
+
+        const openaiRes = await fetch('https://api.openai.com/v1/chat/completions', {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json',
+                'Authorization': `Bearer ${process.env.OPENAI_API_KEY}`
+            },
+            body: JSON.stringify({
+                model: 'gpt-4o-mini',
+                messages: [
+                    { role: 'system', content: OPTIMIZE_SYSTEM_PROMPT },
+                    { role: 'user', content: prompt.trim() }
+                ],
+                temperature: 0.2,
+                max_tokens: 300
+            })
+        });
+
+        if (!openaiRes.ok) {
+            const err = await openaiRes.json().catch(() => ({}));
+            console.error('[OPTIMIZE PROMPT] OpenAI error:', openaiRes.status, JSON.stringify(err));
+            return res.status(502).json({ error: 'OpenAI request failed.', detail: err });
+        }
+
+        const data = await openaiRes.json();
+        res.json({ success: true, data });
+    } catch (error) {
         next(error);
     }
 };

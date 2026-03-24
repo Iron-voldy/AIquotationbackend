@@ -139,12 +139,54 @@ exports.refresh = async (req, res, next) => {
         }
 
         const user = rows[0];
-        const token = generateToken(user);
+        const token = generateToken({ ...user, isAgent: !!req.user.isAgent });
+
+        // For agents: also refresh their Apple API token so they stay logged in
+        let newAppleToken = null;
+        if (req.user.isAgent) {
+            try {
+                const [agentRows] = await pool.query(
+                    'SELECT apple_access_token FROM agent_tokens WHERE user_id = ?',
+                    [user.id]
+                );
+                if (agentRows.length > 0) {
+                    const currentAppleToken = agentRows[0].apple_access_token;
+                    const APPLE_API_URL = process.env.APPLE_API_URL || 'https://stagev2.appletechlabs.com/api';
+                    const appleRefreshRes = await fetch(`${APPLE_API_URL}/auth/refresh`, {
+                        method: 'POST',
+                        headers: {
+                            'Authorization': `Bearer ${currentAppleToken}`,
+                            'Accept': 'application/json',
+                            'Content-Type': 'application/x-www-form-urlencoded'
+                        }
+                    });
+                    if (appleRefreshRes.ok) {
+                        const appleData = await appleRefreshRes.json();
+                        newAppleToken = appleData.access_token || appleData.token;
+                        if (newAppleToken) {
+                            const expiresIn = appleData.expires_in || 3600;
+                            const expiresAt = new Date(Date.now() + expiresIn * 1000);
+                            await pool.query(
+                                'UPDATE agent_tokens SET apple_access_token = ?, expires_at = ? WHERE user_id = ?',
+                                [newAppleToken, expiresAt, user.id]
+                            );
+                            console.log('[REFRESH] Apple token refreshed for agent user:', user.id);
+                        }
+                    } else {
+                        console.warn('[REFRESH] Apple token refresh failed, status:', appleRefreshRes.status);
+                    }
+                }
+            } catch (appleErr) {
+                console.error('[REFRESH] Apple token refresh error:', appleErr.message);
+                // Don't fail the whole refresh if Apple refresh fails — just return the new JWT
+            }
+        }
 
         res.json({
             success: true,
             token,
-            expiresIn: process.env.JWT_EXPIRES_IN || '24h'
+            expiresIn: process.env.JWT_EXPIRES_IN || '24h',
+            ...(newAppleToken && { appleAccessToken: newAppleToken })
         });
     } catch (error) {
         next(error);
