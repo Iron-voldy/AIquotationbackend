@@ -92,6 +92,33 @@ exports.sendMessage = async (req, res, next) => {
             return res.status(400).json({ error: 'Message is required.' });
         }
 
+        // ─────────────────────────────────────────────────────────
+        // DETECT UPDATE REQUEST
+        // Must match the SAME pattern used by n8n:
+        //   (change|update|modify).*quotation
+        //   quotation.*(change|update|modify)
+        //   quotation[_\s-]*no
+        //
+        // REQUIRED MESSAGE FORMAT from user:
+        //   "update quotation {number}"            ← first line
+        //   "{description of what to change}"      ← second line
+        //
+        // Examples:
+        //   "update quotation 291179\nchange 3 adults to 4 adults"
+        //   "change quotation 291179 dates to 2026-05-01"
+        //   "quotation_no 291179 update hotel"
+        // ─────────────────────────────────────────────────────────
+        const isUpdateRequest = /(change|update|modify)[\s\S]*quotation|quotation[\s\S]*(change|update|modify)|quotation[_\s-]*no/i
+            .test(message.trim());
+
+        // Extract quotation number — digits that follow "quotation" (with optional "no")
+        const quotNoMatch = /quotation[_\s-]*(?:no)?[:\s]*(\d+)/i.exec(message.trim());
+        const updateTargetNo = isUpdateRequest && quotNoMatch ? quotNoMatch[1] : null;
+
+        if (isUpdateRequest) {
+            console.log(`[CHAT SEND] UPDATE REQUEST detected — target quotation_no: ${updateTargetNo}`);
+        }
+
         const userId = req.user.id;
         let sessionId = chatSessionId;
 
@@ -228,15 +255,65 @@ exports.sendMessage = async (req, res, next) => {
         console.log('[CHAT SEND] Webhook response received:', JSON.stringify(webhookResponse).substring(0, 200));
 
         // Parse response: check for quotation_no
-        const quotationNo = webhookResponse?.quotation_no;
+        // For update requests, fall back to the number extracted from the user message
+        // if n8n confirms the update but doesn't echo back the quotation_no.
+        let quotationNo = webhookResponse?.quotation_no;
+        if (!quotationNo && isUpdateRequest && updateTargetNo) {
+            quotationNo = updateTargetNo;
+            console.log('[CHAT SEND] Update request — using quotation_no from message:', quotationNo);
+        }
         const isSuccess = quotationNo && String(quotationNo).length > 2;
 
         let assistantContent;
         let savedQuotationNo = null;
+        let revisionNumber   = 1; // tracks the R-value for the email
 
         if (isSuccess) {
             savedQuotationNo = String(quotationNo);
-            assistantContent = webhookResponse.message || `Your travel quotation has been created successfully! Quotation number: ${savedQuotationNo}`;
+
+            // ─────────────────────────────────────────────────────────
+            // REVISION HANDLING
+            // New quotation  → always R1 (first time)
+            // Update request → increment revision: R1→R2→R3 …
+            // ─────────────────────────────────────────────────────────
+            if (isUpdateRequest) {
+                // 1. Check if this quotation is already saved in the quotations table
+                const [existingQuot] = await pool.query(
+                    'SELECT id, revision FROM quotations WHERE quotation_no = ? AND user_id = ?',
+                    [savedQuotationNo, userId]
+                );
+
+                if (existingQuot.length > 0) {
+                    // Quotation exists in DB — increment stored revision
+                    revisionNumber = (existingQuot[0].revision || 1) + 1;
+                    await pool.query(
+                        `UPDATE quotations
+                         SET revision = ?, response_data = ?, prompt_text = ?, updated_at = NOW()
+                         WHERE id = ?`,
+                        [revisionNumber, JSON.stringify(webhookResponse), message.trim(), existingQuot[0].id]
+                    );
+                    console.log(`[REVISION] DB record updated → R${revisionNumber} for quotation_no: ${savedQuotationNo}`);
+                } else {
+                    // Quotation not yet in quotations table — derive current revision from
+                    // the number of successful assistant messages already in this session.
+                    const [msgCount] = await pool.query(
+                        `SELECT COUNT(*) AS count FROM chat_messages
+                         WHERE quotation_no = ? AND user_id = ? AND is_success = 1 AND role = 'assistant'`,
+                        [savedQuotationNo, userId]
+                    );
+                    const currentRevision = msgCount[0].count || 1;
+                    revisionNumber = currentRevision + 1;
+                    console.log(`[REVISION] Derived R${revisionNumber} from chat history (current R${currentRevision}) for quotation_no: ${savedQuotationNo}`);
+                }
+
+                assistantContent = webhookResponse.message ||
+                    `Quotation ${savedQuotationNo} has been updated successfully! New revision: R${revisionNumber}`;
+            } else {
+                // New quotation — revision stays at 1
+                revisionNumber   = 1;
+                assistantContent = webhookResponse.message ||
+                    `Your travel quotation has been created successfully! Quotation number: ${savedQuotationNo}`;
+            }
 
             // Update session title with quotation number if it's still default
             await pool.query(
@@ -246,22 +323,23 @@ exports.sendMessage = async (req, res, next) => {
 
             // ═══════════════════════════════════════════════════════
             // EMAIL WEBHOOK DECISION — ONLY for regular users
+            // Revision suffix: /R1 for new quotations, /R{n} for updates
             // ═══════════════════════════════════════════════════════
             console.log('='.repeat(60));
-            console.log(`[EMAIL DECISION] Quotation ${savedQuotationNo} created`);
+            console.log(`[EMAIL DECISION] Quotation ${savedQuotationNo} — ${isUpdateRequest ? `updated → R${revisionNumber}` : 'created → R1'}`);
             console.log(`[EMAIL DECISION] isAgent = ${isAgent}`);
-            console.log(`[EMAIL DECISION] Action: ${isAgent ? '*** SKIPPING EMAIL (agent) ***' : 'SENDING EMAIL (regular user)'}`);
+            console.log(`[EMAIL DECISION] Action: ${isAgent ? '*** SKIPPING EMAIL (agent) ***' : `SENDING EMAIL (regular user) with /R${revisionNumber}`}`);
             console.log('='.repeat(60));
-            
+
             if (!isAgent) {
                 try {
                     const userEmail = req.user.email;
-                    console.log(`[EMAIL WEBHOOK] Sending email for quotation ${savedQuotationNo} to ${userEmail}`);
+                    console.log(`[EMAIL WEBHOOK] Sending email for quotation ${savedQuotationNo}/R${revisionNumber} to ${userEmail}`);
                     fetch('https://aahaas-ai.app.n8n.cloud/webhook/send-quotation-email', {
                         method: 'POST',
                         headers: { 'Content-Type': 'application/json' },
                         body: JSON.stringify({
-                            quotationID: `${savedQuotationNo}/R1`,
+                            quotationID: `${savedQuotationNo}/R${revisionNumber}`,
                             email: userEmail
                         })
                     }).then(r => console.log(`[EMAIL WEBHOOK] Status: ${r.status}`))
@@ -291,6 +369,8 @@ exports.sendMessage = async (req, res, next) => {
             success: true,
             message: savedMsg[0],
             quotationNo: savedQuotationNo,
+            revisionNumber: isSuccess ? revisionNumber : null,
+            isUpdateRequest,
             isSuccess,
             chatSessionId: sessionId
         });

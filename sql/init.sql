@@ -20,6 +20,7 @@ CREATE TABLE IF NOT EXISTS quotations (
   quotation_no    VARCHAR(50) NOT NULL,
   prompt_text     TEXT NOT NULL,
   status          ENUM('pending', 'accepted', 'rejected', 'expired') DEFAULT 'pending',
+  revision        INT NOT NULL DEFAULT 1,
   response_data   JSON DEFAULT NULL,
   notes           TEXT DEFAULT NULL,
   created_at      TIMESTAMP DEFAULT CURRENT_TIMESTAMP,

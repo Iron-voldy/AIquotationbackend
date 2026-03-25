@@ -200,12 +200,13 @@ exports.saveFromChat = async (req, res, next) => {
 
         if (!isAgent) {
             try {
-                console.log(`[QUOTATION EMAIL] Sending email webhook for ${msg.quotation_no}/R1 to ${req.user.email}`);
+                const savedRevision = saved[0].revision || 1;
+                console.log(`[QUOTATION EMAIL] Sending email webhook for ${msg.quotation_no}/R${savedRevision} to ${req.user.email}`);
                 await fetch('https://aahaas-ai.app.n8n.cloud/webhook/send-quotation-email', {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify({
-                        quotationID: `${msg.quotation_no}/R1`,
+                        quotationID: `${msg.quotation_no}/R${savedRevision}`,
                         email: req.user.email
                     })
                 });
