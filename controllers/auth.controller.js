@@ -24,6 +24,10 @@ exports.register = async (req, res, next) => {
             return res.status(400).json({ error: 'Passwords do not match.' });
         }
 
+        if (name.trim().length > 100) {
+            return res.status(400).json({ error: 'Full name must be 100 characters or fewer.' });
+        }
+
         if (password.length < 6) {
             return res.status(400).json({ error: 'Password must be at least 6 characters.' });
         }
