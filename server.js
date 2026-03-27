@@ -40,7 +40,7 @@ app.use(express.urlencoded({ extended: true }));
 // Rate limiting
 const limiter = rateLimit({
     windowMs: 15 * 60 * 1000, // 15 minutes
-    max: 200,
+    max: 1000,
     message: { error: 'Too many requests. Please try again later.' }
 });
 app.use('/api/', limiter);
@@ -48,7 +48,7 @@ app.use('/api/', limiter);
 // Auth rate limit (stricter)
 const authLimiter = rateLimit({
     windowMs: 15 * 60 * 1000,
-    max: 20,
+    max: 50,
     message: { error: 'Too many auth attempts. Please try again later.' }
 });
 app.use('/api/auth/login', authLimiter);
