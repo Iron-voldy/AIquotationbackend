@@ -8,39 +8,42 @@ exports.list = async (req, res, next) => {
         const offset = (parseInt(page) - 1) * parseInt(limit);
         const userId = req.user.id;
 
-        let where = 'WHERE user_id = ?';
+        let where = 'WHERE q.user_id = ?';
         const params = [userId];
 
         if (status) {
-            where += ' AND status = ?';
+            where += ' AND q.status = ?';
             params.push(status);
         }
 
         if (search) {
-            where += ' AND quotation_no LIKE ?';
-            params.push(`%${search}%`);
+            where += ' AND (q.quotation_no LIKE ? OR q.prompt_text LIKE ?)';
+            params.push(`%${search}%`, `%${search}%`);
         }
 
         if (dateFrom) {
-            where += ' AND DATE(created_at) >= ?';
+            where += ' AND DATE(q.created_at) >= ?';
             params.push(dateFrom);
         }
 
         if (dateTo) {
-            where += ' AND DATE(created_at) <= ?';
+            where += ' AND DATE(q.created_at) <= ?';
             params.push(dateTo);
         }
 
         const [countRows] = await pool.query(
-            `SELECT COUNT(*) as total FROM quotations ${where}`,
+            `SELECT COUNT(*) as total FROM quotations q ${where}`,
             params
         );
         const total = countRows[0].total;
 
         const [quotations] = await pool.query(
-            `SELECT id, quotation_no, prompt_text, status, response_data, notes, created_at, updated_at
-       FROM quotations ${where}
-       ORDER BY created_at DESC LIMIT ? OFFSET ?`,
+            `SELECT q.id, q.quotation_no, q.prompt_text, q.status, q.response_data, q.notes, q.created_at, q.updated_at,
+                    (SELECT cm.chat_session_id FROM chat_messages cm
+                     WHERE cm.quotation_no = q.quotation_no AND cm.user_id = q.user_id
+                     ORDER BY cm.created_at ASC LIMIT 1) AS chat_session_id
+             FROM quotations q ${where}
+             ORDER BY q.created_at DESC LIMIT ? OFFSET ?`,
             [...params, parseInt(limit), offset]
         );
 
