@@ -8,6 +8,7 @@ router.use(auth);
 router.get('/', quotationController.list);
 router.get('/:id', quotationController.get);
 router.post('/save', quotationController.saveFromChat);
+router.post('/reject-from-chat', quotationController.rejectFromChat);
 router.patch('/:id/accept', quotationController.accept);
 router.patch('/:id/reject', quotationController.reject);
 

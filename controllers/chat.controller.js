@@ -66,7 +66,7 @@ exports.getMessages = async (req, res, next) => {
             return res.status(404).json({ error: 'Chat session not found.' });
         }
         const [messages] = await pool.query(
-            'SELECT id, role, content, quotation_no, is_success, response_data, created_at FROM chat_messages WHERE chat_session_id = ? ORDER BY created_at ASC',
+            'SELECT id, role, content, quotation_no, is_success, quotation_status, response_data, created_at FROM chat_messages WHERE chat_session_id = ? ORDER BY created_at ASC',
             [id]
         );
         res.json({ success: true, messages });
@@ -321,35 +321,9 @@ exports.sendMessage = async (req, res, next) => {
                 [`Quotation #${savedQuotationNo}`, sessionId, 'New Chat']
             );
 
-            // ═══════════════════════════════════════════════════════
-            // EMAIL WEBHOOK DECISION — ONLY for regular users
-            // Revision suffix: /R1 for new quotations, /R{n} for updates
-            // ═══════════════════════════════════════════════════════
-            console.log('='.repeat(60));
-            console.log(`[EMAIL DECISION] Quotation ${savedQuotationNo} — ${isUpdateRequest ? `updated → R${revisionNumber}` : 'created → R1'}`);
-            console.log(`[EMAIL DECISION] isAgent = ${isAgent}`);
-            console.log(`[EMAIL DECISION] Action: ${isAgent ? '*** SKIPPING EMAIL (agent) ***' : `SENDING EMAIL (regular user) with /R${revisionNumber}`}`);
-            console.log('='.repeat(60));
-
-            if (!isAgent) {
-                try {
-                    const userEmail = req.user.email;
-                    console.log(`[EMAIL WEBHOOK] Sending email for quotation ${savedQuotationNo}/R${revisionNumber} to ${userEmail}`);
-                    fetch('https://aahaas-ai.app.n8n.cloud/webhook/send-quotation-email', {
-                        method: 'POST',
-                        headers: { 'Content-Type': 'application/json' },
-                        body: JSON.stringify({
-                            quotationID: `${savedQuotationNo}/R${revisionNumber}`,
-                            email: userEmail
-                        })
-                    }).then(r => console.log(`[EMAIL WEBHOOK] Status: ${r.status}`))
-                      .catch(err => console.error('[EMAIL WEBHOOK] Failed:', err.message));
-                } catch (emailErr) {
-                    console.error('[EMAIL WEBHOOK] Error:', emailErr.message);
-                }
-            } else {
-                console.log(`[EMAIL WEBHOOK] *** NOT SENDING — user ${userId} is an AGENT ***`);
-            }
+            // NOTE: Email is sent ONLY when the user explicitly accepts and saves the quotation
+            // via quotationAPI.saveFromChat (quotation.controller.js → saveFromChat).
+            // We do NOT send email at creation time.
         } else {
             assistantContent = webhookResponse?.error ||
                 'Sorry, I could not create a quotation at this time. Please try rephrasing your request with destination, dates, and number of travelers.';
@@ -362,6 +336,39 @@ exports.sendMessage = async (req, res, next) => {
         );
 
         const [savedMsg] = await pool.query('SELECT * FROM chat_messages WHERE id = ?', [msgResult.insertId]);
+
+        // ───────────────────────────────────────────────────────
+        // AUTO-UPSERT into quotations table so dashboard shows
+        // the correct Pending / Accepted / Rejected counts.
+        // New quotation  → INSERT as 'pending'
+        // Update request → UPDATE revision + prompt_text only
+        // ───────────────────────────────────────────────────────
+        if (isSuccess && savedQuotationNo) {
+            try {
+                const [existQ] = await pool.query(
+                    'SELECT id, status FROM quotations WHERE quotation_no = ? AND user_id = ?',
+                    [savedQuotationNo, userId]
+                );
+                if (existQ.length === 0) {
+                    // First time — insert as pending
+                    await pool.query(
+                        'INSERT INTO quotations (user_id, quotation_no, prompt_text, status, revision, response_data) VALUES (?, ?, ?, ?, ?, ?)',
+                        [userId, savedQuotationNo, message.trim(), 'pending', 1, JSON.stringify(webhookResponse)]
+                    );
+                    console.log(`[CHAT SEND] Auto-inserted quotation ${savedQuotationNo} as pending`);
+                } else if (isUpdateRequest) {
+                    // Update request — bump revision, keep existing status
+                    await pool.query(
+                        'UPDATE quotations SET revision = ?, prompt_text = ?, response_data = ?, updated_at = NOW() WHERE id = ?',
+                        [revisionNumber, message.trim(), JSON.stringify(webhookResponse), existQ[0].id]
+                    );
+                    console.log(`[CHAT SEND] Bumped revision for quotation ${savedQuotationNo} to R${revisionNumber}`);
+                }
+            } catch (upsertErr) {
+                // Non-fatal — don't block the chat response
+                console.error('[CHAT SEND] Auto-upsert to quotations failed:', upsertErr.message);
+            }
+        }
 
         console.log('[CHAT SEND] Message saved. ID:', msgResult.insertId, '| Quotation:', savedQuotationNo || 'none');
 
