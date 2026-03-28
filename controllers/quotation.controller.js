@@ -4,7 +4,7 @@ const fetch = require('node-fetch');
 // GET /api/quotations
 exports.list = async (req, res, next) => {
     try {
-        const { page = 1, limit = 10, status, search } = req.query;
+        const { page = 1, limit = 10, status, search, dateFrom, dateTo } = req.query;
         const offset = (parseInt(page) - 1) * parseInt(limit);
         const userId = req.user.id;
 
@@ -19,6 +19,16 @@ exports.list = async (req, res, next) => {
         if (search) {
             where += ' AND quotation_no LIKE ?';
             params.push(`%${search}%`);
+        }
+
+        if (dateFrom) {
+            where += ' AND DATE(created_at) >= ?';
+            params.push(dateFrom);
+        }
+
+        if (dateTo) {
+            where += ' AND DATE(created_at) <= ?';
+            params.push(dateTo);
         }
 
         const [countRows] = await pool.query(
