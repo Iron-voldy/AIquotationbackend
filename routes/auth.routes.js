@@ -9,6 +9,6 @@ router.post('/agent-login', authController.agentLogin);
 router.post('/logout', auth, authController.logout);
 router.get('/me', auth, authController.me);
 router.put('/me/theme', auth, authController.updateTheme);
-router.post('/refresh', auth, authController.refresh);
+router.post('/refresh', auth.allowExpired, authController.refresh);
 
 module.exports = router;

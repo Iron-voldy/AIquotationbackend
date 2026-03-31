@@ -247,34 +247,9 @@ exports.sendMessage = async (req, res, next) => {
                 } else {
                     // Token expired — try to refresh via Apple API before giving up
                     console.warn('[CHAT SEND] Agent token expired for user:', userId, '— attempting refresh...');
-                    const APPLE_API_URL = process.env.APPLE_API_URL || 'https://stagev2.appletechlabs.com/api';
                     try {
-                        const refreshRes = await fetch(`${APPLE_API_URL}/auth/refresh`, {
-                            method: 'POST',
-                            headers: {
-                                'Authorization': `Bearer ${agentRow.apple_access_token}`,
-                                'Accept': 'application/json',
-                                'Content-Type': 'application/x-www-form-urlencoded'
-                            }
-                        });
-                        if (refreshRes.ok) {
-                            const refreshData = await refreshRes.json();
-                            const newAppleToken = refreshData.access_token || refreshData.token;
-                            if (newAppleToken) {
-                                const expiresIn = refreshData.expires_in || 3600;
-                                const expiresAt = new Date(Date.now() + expiresIn * 1000);
-                                await pool.query(
-                                    'UPDATE agent_tokens SET apple_access_token = ?, expires_at = ? WHERE user_id = ?',
-                                    [newAppleToken, expiresAt, userId]
-                                );
-                                appleToken = newAppleToken;
-                                console.log('[CHAT SEND] Agent token refreshed successfully for user:', userId);
-                            } else {
-                                throw new Error('Refresh response missing token');
-                            }
-                        } else {
-                            throw new Error(`Apple refresh returned ${refreshRes.status}`);
-                        }
+                        appleToken = await appleTokenService.refreshAgentToken(userId, agentRow.apple_access_token);
+                        console.log('[CHAT SEND] Agent token refreshed successfully for user:', userId);
                     } catch (refreshErr) {
                         console.error('[CHAT SEND] Agent token refresh failed:', refreshErr.message);
                         throw new Error('Agent token expired. Please log out and log in again.');
@@ -308,7 +283,51 @@ exports.sendMessage = async (req, res, next) => {
         // sessionId, so n8n conflates ALL users' conversations into a single memory thread.
         const n8nSessionId = `u${userId}_s${sessionId}`;
         console.log('[CHAT SEND] Calling n8n webhook with n8nSessionId:', n8nSessionId);
-        const webhookResponse = await webhookService.sendToN8N(message.trim(), appleToken, n8nSessionId);
+        let webhookResponse = await webhookService.sendToN8N(message.trim(), appleToken, n8nSessionId);
+        if (webhookResponse?.authExpired) {
+            console.warn('[CHAT SEND] Webhook reported expired bearer token. Refreshing and retrying once...');
+            try {
+                appleToken = isAgent
+                    ? await appleTokenService.refreshAgentToken(userId, appleToken)
+                    : await appleTokenService.forceRefreshSharedToken(appleToken);
+
+                webhookResponse = await webhookService.sendToN8N(message.trim(), appleToken, n8nSessionId);
+            } catch (refreshErr) {
+                console.error('[CHAT SEND] Bearer refresh after webhook 401 failed:', refreshErr.message);
+                const retryErrMsg = isAgent
+                    ? 'Your agent session has expired. Please log out and log in again.'
+                    : 'AI service token expired and could not be refreshed. Please try again in a moment.';
+
+                await pool.query(
+                    'INSERT INTO chat_messages (chat_session_id, user_id, role, content, is_success) VALUES (?, ?, ?, ?, ?)',
+                    [sessionId, userId, 'assistant', retryErrMsg, false]
+                );
+
+                return res.status(401).json({
+                    success: false,
+                    error: retryErrMsg,
+                    chatSessionId: sessionId
+                });
+            }
+        }
+
+        if (webhookResponse?.authExpired) {
+            const expiredErrMsg = isAgent
+                ? 'Your agent session has expired. Please log out and log in again.'
+                : 'AI service token expired and could not be refreshed. Please try again in a moment.';
+
+            await pool.query(
+                'INSERT INTO chat_messages (chat_session_id, user_id, role, content, is_success) VALUES (?, ?, ?, ?, ?)',
+                [sessionId, userId, 'assistant', expiredErrMsg, false]
+            );
+
+            return res.status(401).json({
+                success: false,
+                error: expiredErrMsg,
+                chatSessionId: sessionId
+            });
+        }
+
         console.log('[CHAT SEND] Webhook response received:', JSON.stringify(webhookResponse).substring(0, 200));
 
         // Parse response: check for quotation_no

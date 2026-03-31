@@ -1,6 +1,7 @@
 const bcrypt = require('bcryptjs');
 const jwt = require('jsonwebtoken');
 const pool = require('../config/database');
+const appleTokenService = require('../services/appleToken.service');
 
 const generateToken = (user) => {
     return jwt.sign(
@@ -177,36 +178,7 @@ exports.refresh = async (req, res, next) => {
                     // Only attempt refresh if Apple token is approaching expiry (within 30 minutes)
                     if (timeUntilExpiry < 30 * 60 * 1000) {
                         console.log(`[REFRESH] Apple token expiring in ${Math.round(timeUntilExpiry / 60000)}m, attempting refresh`);
-                        
-                        const APPLE_API_URL = process.env.APPLE_API_URL || 'https://stagev2.appletechlabs.com/api';
-                        const appleRefreshRes = await fetch(`${APPLE_API_URL}/auth/refresh`, {
-                            method: 'POST',
-                            headers: {
-                                'Authorization': `Bearer ${currentAppleToken}`,
-                                'Accept': 'application/json',
-                                'Content-Type': 'application/x-www-form-urlencoded'
-                            }
-                        });
-                        
-                        if (appleRefreshRes.ok) {
-                            const appleData = await appleRefreshRes.json();
-                            newAppleToken = appleData.access_token || appleData.token;
-                            
-                            if (newAppleToken) {
-                                const expiresIn = appleData.expires_in || 3600;
-                                const newExpiresAt = new Date(Date.now() + expiresIn * 1000);
-                                
-                                await pool.query(
-                                    'UPDATE agent_tokens SET apple_access_token = ?, expires_at = ? WHERE user_id = ?',
-                                    [newAppleToken, newExpiresAt, userId]
-                                );
-                                console.log(`[REFRESH] Apple token refreshed for agent user ${userId}, expires in ${expiresIn}s`);
-                            }
-                        } else {
-                            const statusText = await appleRefreshRes.text();
-                            console.warn(`[REFRESH] Apple token refresh failed for user ${userId}, status: ${appleRefreshRes.status}`, statusText);
-                            // Don't fail the JWT refresh if Apple refresh fails
-                        }
+                        newAppleToken = await appleTokenService.refreshAgentToken(userId, currentAppleToken);
                     } else {
                         console.log(`[REFRESH] Apple token still valid for ${Math.round(timeUntilExpiry / 60000)}m, skipping refresh`);
                     }
