@@ -148,9 +148,11 @@ exports.getQuotations = async (req, res, next) => {
         );
 
         const [quotations] = await pool.query(
-            `SELECT q.*, u.name as user_name, u.email as user_email
+            `SELECT q.*,
+                    COALESCE(u.name, 'Unknown User') as user_name,
+                    COALESCE(u.email, '') as user_email
        FROM quotations q
-       JOIN users u ON u.id = q.user_id
+       LEFT JOIN users u ON u.id = q.user_id
        ${whereStr}
        ORDER BY q.created_at DESC
        LIMIT ? OFFSET ?`,

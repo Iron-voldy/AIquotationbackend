@@ -1,15 +1,34 @@
 const pool = require('../config/database');
 const fetch = require('node-fetch');
 
+const SUPER_ADMIN_IDENTIFIERS = new Set([
+    (process.env.SUPER_ADMIN_EMAIL || '').toLowerCase(),
+    'dilshan.perera.aahaas.com',
+    'dilshan.perera@aahaas.com'
+].filter(Boolean));
+
+const canAgentAccessAllQuotations = (user) => {
+    const email = (user?.email || '').toLowerCase();
+    return !!user?.isAgent && SUPER_ADMIN_IDENTIFIERS.has(email);
+};
+
 // GET /api/quotations
 exports.list = async (req, res, next) => {
     try {
         const { page = 1, limit = 10, status, search, dateFrom, dateTo } = req.query;
         const offset = (parseInt(page) - 1) * parseInt(limit);
         const userId = req.user.id;
+        const canViewAll = canAgentAccessAllQuotations(req.user);
 
-        let where = 'WHERE q.user_id = ?';
-        const params = [userId];
+        let where = 'WHERE 1=1';
+        const params = [];
+
+        // Only super admin agent can see all quotations.
+        // Regular users and regular agents are limited to their own.
+        if (!canViewAll) {
+            where += ' AND q.user_id = ?';
+            params.push(userId);
+        }
 
         if (status) {
             where += ' AND q.status = ?';
@@ -63,10 +82,13 @@ exports.list = async (req, res, next) => {
 // GET /api/quotations/:id
 exports.get = async (req, res, next) => {
     try {
-        const [rows] = await pool.query(
-            'SELECT * FROM quotations WHERE id = ? AND user_id = ?',
-            [req.params.id, req.user.id]
-        );
+        const canViewAll = canAgentAccessAllQuotations(req.user);
+        const query = canViewAll
+            ? 'SELECT * FROM quotations WHERE id = ?'
+            : 'SELECT * FROM quotations WHERE id = ? AND user_id = ?';
+        const queryParams = canViewAll ? [req.params.id] : [req.params.id, req.user.id];
+
+        const [rows] = await pool.query(query, queryParams);
         if (rows.length === 0) {
             return res.status(404).json({ error: 'Quotation not found.' });
         }
@@ -79,10 +101,13 @@ exports.get = async (req, res, next) => {
 // PATCH /api/quotations/:id/accept
 exports.accept = async (req, res, next) => {
     try {
-        const [rows] = await pool.query(
-            "SELECT id, status FROM quotations WHERE id = ? AND user_id = ?",
-            [req.params.id, req.user.id]
-        );
+        const canViewAll = canAgentAccessAllQuotations(req.user);
+        const query = canViewAll
+            ? "SELECT id, status FROM quotations WHERE id = ?"
+            : "SELECT id, status FROM quotations WHERE id = ? AND user_id = ?";
+        const queryParams = canViewAll ? [req.params.id] : [req.params.id, req.user.id];
+
+        const [rows] = await pool.query(query, queryParams);
         if (rows.length === 0) return res.status(404).json({ error: 'Quotation not found.' });
         if (rows[0].status !== 'pending') {
             return res.status(400).json({ error: `Cannot accept a quotation with status: ${rows[0].status}` });
@@ -101,10 +126,13 @@ exports.accept = async (req, res, next) => {
 // PATCH /api/quotations/:id/reject
 exports.reject = async (req, res, next) => {
     try {
-        const [rows] = await pool.query(
-            "SELECT id, status FROM quotations WHERE id = ? AND user_id = ?",
-            [req.params.id, req.user.id]
-        );
+        const canViewAll = canAgentAccessAllQuotations(req.user);
+        const query = canViewAll
+            ? "SELECT id, status FROM quotations WHERE id = ?"
+            : "SELECT id, status FROM quotations WHERE id = ? AND user_id = ?";
+        const queryParams = canViewAll ? [req.params.id] : [req.params.id, req.user.id];
+
+        const [rows] = await pool.query(query, queryParams);
         if (rows.length === 0) return res.status(404).json({ error: 'Quotation not found.' });
         if (rows[0].status !== 'pending') {
             return res.status(400).json({ error: `Cannot reject a quotation with status: ${rows[0].status}` });

@@ -3,6 +3,38 @@ const fetch = require('node-fetch');
 const appleTokenService = require('../services/appleToken.service');
 const webhookService = require('../services/webhook.service');
 
+const validateTravelPrompt = (rawText) => {
+    const msg = (rawText || '').trim();
+    if (!msg) return { isValid: false, reason: 'empty' };
+
+    const compact = msg.replace(/\s+/g, ' ');
+    const words = compact.split(' ').filter(Boolean);
+    const letters = (compact.match(/[a-z]/gi) || []).length;
+    const nonSpaceChars = compact.replace(/\s/g, '').length;
+    const letterRatio = nonSpaceChars ? letters / nonSpaceChars : 0;
+
+    if (compact.length < 8) return { isValid: false, reason: 'too_short' };
+    if (/^(.)\1+$/i.test(compact.replace(/\s/g, ''))) return { isValid: false, reason: 'repeated_chars' };
+    if (/\b[bcdfghjklmnpqrstvwxyz]{7,}\b/i.test(compact)) return { isValid: false, reason: 'consonant_smash' };
+    if (/\d{4,}[a-z]{4,}|[a-z]{4,}\d{4,}/i.test(compact) && words.length <= 2) {
+        return { isValid: false, reason: 'alnum_smash' };
+    }
+    if (letterRatio < 0.35) return { isValid: false, reason: 'low_letters' };
+
+    const hasTravelKeyword = /\b(trip|travel|package|tour|holiday|vacation|itinerary|quotation|quote|hotel|flight|visa|sightseeing|destination)\b/i.test(compact);
+    const hasDuration = /\b\d+\s*(day|days|night|nights|week|weeks)\b/i.test(compact);
+    const hasTravellers = /\b\d+\s*(pax|people|persons?|travellers?|adults?|children|kids|child)\b/i.test(compact)
+        || /\b(adults?|children|kids|child)\b/i.test(compact);
+    const hasDate = /\b(\d{1,2}[/-]\d{1,2}([/-]\d{2,4})?|\d{1,2}(st|nd|rd|th)?\s+(jan|feb|mar|apr|may|jun|jul|aug|sep|sept|oct|nov|dec|january|february|march|april|june|july|august|september|october|november|december)|from\s+\d{4}|travel\s+starts)\b/i.test(compact);
+    const hasDestinationCue = /\b(to|for|in)\s+[a-z]{3,}\b/i.test(compact);
+
+    const travelSignals = [hasTravelKeyword, hasDuration, hasTravellers, hasDate, hasDestinationCue].filter(Boolean).length;
+    if (travelSignals >= 2) return { isValid: true, reason: null };
+    if (hasTravelKeyword && words.length >= 4) return { isValid: true, reason: null };
+
+    return { isValid: false, reason: 'missing_travel_details' };
+};
+
 // GET /api/chat/sessions
 exports.getSessions = async (req, res, next) => {
     try {
@@ -149,6 +181,31 @@ exports.sendMessage = async (req, res, next) => {
             'INSERT INTO chat_messages (chat_session_id, user_id, role, content) VALUES (?, ?, ?, ?)',
             [sessionId, userId, 'user', message.trim()]
         );
+
+        // Strong server-side validation gate.
+        // This prevents malformed/random text from reaching n8n and downstream APIs.
+        if (!isUpdateRequest) {
+            const validation = validateTravelPrompt(message.trim());
+            if (!validation.isValid) {
+                const validationText = 'Please enter a valid travel request with destination, duration, and travellers. Example: "Create Singapore trip/package for 3 nights for 3 pax".';
+                const [invalidMsgResult] = await pool.query(
+                    'INSERT INTO chat_messages (chat_session_id, user_id, role, content, is_success) VALUES (?, ?, ?, ?, ?)',
+                    [sessionId, userId, 'assistant', validationText, 0]
+                );
+                const [invalidSaved] = await pool.query('SELECT * FROM chat_messages WHERE id = ?', [invalidMsgResult.insertId]);
+
+                console.warn('[CHAT SEND] Blocked invalid/non-travel prompt before n8n call. Reason:', validation.reason);
+                return res.status(200).json({
+                    success: true,
+                    message: invalidSaved[0],
+                    quotationNo: null,
+                    revisionNumber: null,
+                    isUpdateRequest,
+                    isSuccess: false,
+                    chatSessionId: sessionId
+                });
+            }
+        }
 
         // ═══════════════════════════════════════════════════════
         // AGENT CHECK — determine if this user is an agent
