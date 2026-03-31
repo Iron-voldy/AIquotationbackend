@@ -7,7 +7,7 @@ const generateToken = (user) => {
     return jwt.sign(
         { id: user.id, email: user.email, role: user.role, isAgent: !!user.isAgent },
         process.env.JWT_SECRET,
-        { expiresIn: process.env.JWT_EXPIRES_IN || '24h' }
+        { expiresIn: process.env.JWT_EXPIRES_IN || '1h' }
     );
 };
 
@@ -62,7 +62,7 @@ exports.register = async (req, res, next) => {
             success: true,
             user,
             token,
-            expiresIn: process.env.JWT_EXPIRES_IN || '24h'
+            expiresIn: process.env.JWT_EXPIRES_IN || '1h'
         });
     } catch (error) {
         next(error);
@@ -106,7 +106,7 @@ exports.login = async (req, res, next) => {
             success: true,
             user: userData,
             token,
-            expiresIn: process.env.JWT_EXPIRES_IN || '24h'
+            expiresIn: process.env.JWT_EXPIRES_IN || '1h'
         });
     } catch (error) {
         next(error);
@@ -195,7 +195,7 @@ exports.refresh = async (req, res, next) => {
         const response = {
             success: true,
             token: newJWT,
-            expiresIn: process.env.JWT_EXPIRES_IN || '24h'
+            expiresIn: process.env.JWT_EXPIRES_IN || '1h'
         };
         
         if (newAppleToken) {

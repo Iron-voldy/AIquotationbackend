@@ -24,15 +24,18 @@ const auth = async (req, res, next) => {
         const decoded = verifyToken(token);
         req.user = decoded;
         req.authToken = token;
-        console.log(`[AUTH MIDDLEWARE] User: ${decoded.id} | Email: ${decoded.email} | isAgent: ${decoded.isAgent} | Path: ${req.method} ${req.path}`);
+        console.log(`[AUTH MIDDLEWARE] ✅ User: ${decoded.id} | Email: ${decoded.email} | isAgent: ${decoded.isAgent} | Path: ${req.method} ${req.path}`);
         next();
     } catch (error) {
         if (error.name === 'TokenExpiredError') {
+            console.warn(`[AUTH MIDDLEWARE] ❌ TOKEN EXPIRED | Error: ${error.message} | Path: ${req.method} ${req.path}`);
             return res.status(401).json({ error: 'Token expired. Please login again.' });
         }
         if (error.name === 'JsonWebTokenError') {
+            console.warn(`[AUTH MIDDLEWARE] ❌ INVALID TOKEN | Error: ${error.message} | Path: ${req.method} ${req.path}`);
             return res.status(401).json({ error: 'Invalid token.' });
         }
+        console.error(`[AUTH MIDDLEWARE] ❌ AUTH FAILED | Error: ${error.message} | Path: ${req.method} ${req.path}`);
         return res.status(401).json({ error: 'Authentication failed.' });
     }
 };
@@ -48,12 +51,14 @@ const allowExpired = async (req, res, next) => {
         const decoded = verifyToken(token, { ignoreExpiration: true });
         req.user = decoded;
         req.authToken = token;
-        console.log(`[AUTH MIDDLEWARE] Allow-expired auth for user: ${decoded.id} | Email: ${decoded.email} | Path: ${req.method} ${req.path}`);
+        console.log(`[AUTH MIDDLEWARE] 🔄 Allow-expired auth for user: ${decoded.id} | Email: ${decoded.email} | Path: ${req.method} ${req.path}`);
         next();
     } catch (error) {
         if (error.name === 'JsonWebTokenError') {
+            console.warn(`[AUTH MIDDLEWARE] ❌ INVALID TOKEN in allowExpired | Error: ${error.message}`);
             return res.status(401).json({ error: 'Invalid token.' });
         }
+        console.error(`[AUTH MIDDLEWARE] ❌ Auth failed in allowExpired | Error: ${error.message}`);
         return res.status(401).json({ error: 'Authentication failed.' });
     }
 };
